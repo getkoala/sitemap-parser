@@ -11,10 +11,13 @@ class SitemapParser
   DEFAULT_OPTIONS = {
     followlocation: true,
     recurse: false,
-    url_regex: nil
+    url_regex: nil,
+    graceful: false
   }.freeze
 
   DEFLATE_TYPE_REGEX = %r{application/((x-)?gzip|octet-stream)}.freeze
+
+  class FailedSiteMapError < StandardError; end
 
   def initialize(url, opts = {})
     @url = url
@@ -35,14 +38,21 @@ class SitemapParser
               elsif sitemapindex
                 options[:recurse] ? parse_sitemap_index : []
               else
-                raise 'Malformed sitemap, no urlset or sitemapindex'
+                raise FailedSiteMapError.new('Malformed sitemap, no urlset or sitemapindex')
               end
+
+  rescue FailedSiteMapError => e
+    if options[:graceful]
+      return []
+    else
+      raise e
+    end
   end
 
   def to_a
     urls.map { |url| url.at('loc').content }
   rescue NoMethodError
-    raise 'Malformed sitemap, url without loc'
+    raise FailedSiteMapError.new('Malformed sitemap, url without loc')
   end
 
   private
@@ -54,7 +64,11 @@ class SitemapParser
     urls = filter_sitemap_urls(urls)
     urls.each do |sitemap|
       child_sitemap_location = sitemap.at('loc').content
-      found_urls << self.class.new(child_sitemap_location, recurse: @options[:recurse]).urls
+      begin
+        found_urls << self.class.new(child_sitemap_location, recurse: @options[:recurse]).urls
+      rescue FailedSiteMapError => e
+        raise e unless options[:graceful]
+      end
     end
 
     found_urls.flatten
@@ -101,13 +115,19 @@ class SitemapParser
   def fetch_remote_sitemap
     return nil unless remote_sitemap?
 
-    request_options = options.dup.tap { |opts| opts.delete(:recurse); opts.delete(:url_regex) }
+    request_options = options.dup.tap { |opts| opts.delete(:recurse); opts.delete(:url_regex); opts.delete(:graceful) }
     request = Typhoeus::Request.new(url, request_options)
 
     response = request.run
-    raise "HTTP request to #{url} failed" unless response.success?
+    raise FailedSiteMapError.new("HTTP request to #{url} failed") unless response.success?
 
     inflate_body_if_needed(response)
+  rescue FailedSiteMapError => e
+    if options[:graceful]
+      return nil
+    else
+      raise e
+    end
   end
 
   def read_local_sitemap
